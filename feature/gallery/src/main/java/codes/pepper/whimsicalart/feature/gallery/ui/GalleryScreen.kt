@@ -1,3 +1,4 @@
+
 package codes.pepper.whimsicalart.feature.gallery.ui
 
 import android.Manifest
@@ -11,6 +12,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -28,7 +30,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -46,6 +47,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
@@ -68,6 +70,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,18 +78,22 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import coil.compose.AsyncImage
-import codes.pepper.whimsicalart.feature.gallery.domain.GroupDimension
-import codes.pepper.whimsicalart.feature.gallery.domain.GroupDirection
 import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 import codes.pepper.whimsicalart.core.designsystem.ScaledTopBar
 import codes.pepper.whimsicalart.core.designsystem.ScaledTopBarIconButton
-import kotlinx.coroutines.launch
+import codes.pepper.whimsicalart.feature.gallery.domain.GroupDimension
+import codes.pepper.whimsicalart.feature.gallery.domain.GroupDirection
 import codes.pepper.whimsicalart.feature.gallery.domain.Photo
 import codes.pepper.whimsicalart.feature.gallery.domain.PhotoGroup
 import codes.pepper.whimsicalart.feature.gallery.domain.SortDirection
 import codes.pepper.whimsicalart.feature.gallery.domain.SortField
 import codes.pepper.whimsicalart.feature.gallery.domain.tag.SceneTag
 import codes.pepper.whimsicalart.feature.gallery.ui.viewmodel.GalleryViewModel
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -103,10 +110,38 @@ fun GalleryScreen(
 
     var showSortGroupDialog by remember { mutableStateOf(false) }
 
-    // The gallery top bar is a primary-coloured bar; its action TextButtons must
-    // render onPrimary text (ButtonDefaults default content colour is primary, which
-    // is invisible on a primary background). "Open (N)" and the dialog's "Done" live
-    // on light surfaces and keep the default colours.
+    // Admin panel state
+    var showAdminLogin by rememberSaveable { mutableStateOf(false) }
+    var showAdminPanel by rememberSaveable { mutableStateOf(false) }
+    var adminPassword by rememberSaveable { mutableStateOf("") }
+    var passwordError by remember { mutableStateOf(false) }
+
+    val stats = remember {
+        context.getSharedPreferences(
+            "whimsicalart_panel_stats",
+            android.content.Context.MODE_PRIVATE
+        )
+    }
+
+    val launchCount = remember(showAdminPanel) {
+        stats.getLong("launch_count", 0L)
+    }
+
+    val lastLaunch = remember(showAdminPanel) {
+        stats.getLong("last_launch", 0L)
+    }
+
+    val lastLaunchText = remember(lastLaunch) {
+        if (lastLaunch == 0L) {
+            "نامشخص"
+        } else {
+            SimpleDateFormat(
+                "yyyy/MM/dd - HH:mm",
+                Locale.getDefault()
+            ).format(Date(lastLaunch))
+        }
+    }
+
     val topBarTextButtonColors = ButtonDefaults.textButtonColors(
         contentColor = MaterialTheme.colorScheme.onPrimary,
         disabledContentColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.6f)
@@ -120,7 +155,10 @@ fun GalleryScreen(
 
     var hasPermission by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(context, mediaPermission) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(
+                context,
+                mediaPermission
+            ) == PackageManager.PERMISSION_GRANTED
         )
     }
 
@@ -133,15 +171,6 @@ fun GalleryScreen(
         }
     }
 
-    // Load ONLY on the first entry into composition with permission and no
-    // cached list. The viewModel is scoped to the navigation backstack entry,
-    // so returning from Settings/the editor recomposes this screen but the VM
-    // still holds the cached list — reloading here unconditionally would throw
-    // the grid away to the full-screen loader and re-run the MediaStore query +
-    // thumbnail fetch on EVERY back navigation (the slow-return report). Only
-    // onGalleryResumed() refreshes (the lifecycle hook below), and only when
-    // the media store genuinely changed (mediaDirty). An empty list after a
-    // failed load re-runs the query on a fresh composition (retry for free).
     LaunchedEffect(hasPermission, uiState.photos.isEmpty()) {
         if (hasPermission) {
             if (uiState.photos.isEmpty()) {
@@ -152,40 +181,37 @@ fun GalleryScreen(
         }
     }
 
-    // rememberSaveable — not plain remember() — so the flag survives the
-    // Settings/editor round-trip: the navigation backstack keeps the gallery
-    // entry's saved state alive while it is off the composition, and a
-    // back-return must look like a REAL resume (run onGalleryResumed), not like
-    // a brand-new screen whose "first resume" skips the mediaDirty refresh.
-    var hasResumedOnce by rememberSaveable { mutableStateOf(false) }
+    var hasResumedOnce by rememberSaveable {
+        mutableStateOf(false)
+    }
+
     val currentHasPermission by rememberUpdatedState(hasPermission)
+
     LifecycleResumeEffect(Unit) {
         val isFirstResume = !hasResumedOnce
         hasResumedOnce = true
+
         if (currentHasPermission && !isFirstResume) {
-            // Reuse the cached list: only a real media-store change (observer
-            // fired since the last query) re-runs the MediaStore query, so an
-            // immediate Settings/editor round-trip never rebuilds the grid.
             viewModel.onGalleryResumed()
         }
+
         onPauseOrDispose { }
     }
 
-    // System back is NOT a nav pop here — the group drill-in is pure VM state
-    // (openedGroup) and the gallery is the NavHost start destination, so an
-    // unhandled back-press would bubble to the activity and exit the app.
-    // Back with a group (or a multi-select in progress) consumes the gesture
-    // instead: multi-select flips back to normal first (matching the top-bar
-    // Cancel action), otherwise the drill-in closes and the grid returns.
-    BackHandler(enabled = uiState.openedGroup != null || uiState.isMultiSelectMode) {
-        if (uiState.isMultiSelectMode) {
-            viewModel.clearSelection()
-        } else {
-            viewModel.closeGroup()
+    BackHandler(
+        enabled = showAdminPanel || showAdminLogin ||
+            uiState.openedGroup != null || uiState.isMultiSelectMode
+    ) {
+        when {
+            showAdminPanel -> showAdminPanel = false
+            showAdminLogin -> showAdminLogin = false
+            uiState.isMultiSelectMode -> viewModel.clearSelection()
+            else -> viewModel.closeGroup()
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+
         ScaledTopBar(
             title = when {
                 uiState.isMultiSelectMode -> {
@@ -220,6 +246,7 @@ fun GalleryScreen(
                             )
                         )
                     }
+
                     TextButton(
                         colors = topBarTextButtonColors,
                         onClick = { viewModel.clearSelection() }
@@ -237,6 +264,7 @@ fun GalleryScreen(
                         contentDescription = "Sort / Group",
                         icon = Icons.Filled.FolderOpen
                     )
+
                     onOpenCamera?.let {
                         ScaledTopBarIconButton(
                             onClick = it,
@@ -244,15 +272,21 @@ fun GalleryScreen(
                             icon = Icons.Filled.PhotoCamera
                         )
                     }
+
                     ScaledTopBarIconButton(
                         enabled = !uiState.isTagging && uiState.photos.isNotEmpty(),
                         onClick = {
                             val targets = uiState.filteredPhotos ?: uiState.photos
                             targets.forEach { viewModel.tagPhoto(it) }
                         },
-                        contentDescription = if (uiState.isTagging) "Tagging" else "Tag all photos",
+                        contentDescription = if (uiState.isTagging) {
+                            "Tagging"
+                        } else {
+                            "Tag all photos"
+                        },
                         icon = Icons.Filled.Tag
                     )
+
                     onOpenSettings?.let {
                         ScaledTopBarIconButton(
                             onClick = it,
@@ -267,12 +301,39 @@ fun GalleryScreen(
                             val targets = uiState.filteredPhotos ?: uiState.photos
                             targets.forEach { viewModel.tagPhoto(it) }
                         },
-                        contentDescription = if (uiState.isTagging) "Tagging" else "Tag all photos",
+                        contentDescription = if (uiState.isTagging) {
+                            "Tagging"
+                        } else {
+                            "Tag all photos"
+                        },
                         icon = Icons.Filled.Tag
                     )
                 }
             }
         )
+
+        // Admin button in the center of the main gallery
+        if (uiState.openedGroup == null && !uiState.isMultiSelectMode) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        horizontal = 16.dp * s,
+                        vertical = 6.dp * s
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Button(
+                    onClick = {
+                        adminPassword = ""
+                        passwordError = false
+                        showAdminLogin = true
+                    }
+                ) {
+                    Text("@panel")
+                }
+            }
+        }
 
         TagFilterRow(
             availableTags = uiState.availableTags,
@@ -310,8 +371,11 @@ fun GalleryScreen(
                             ),
                             textAlign = TextAlign.Center
                         )
+
                         Button(
-                            onClick = { permissionLauncher.launch(mediaPermission) },
+                            onClick = {
+                                permissionLauncher.launch(mediaPermission)
+                            },
                             modifier = Modifier.padding(top = 16.dp * s)
                         ) {
                             Text(
@@ -323,11 +387,13 @@ fun GalleryScreen(
                         }
                     }
                 }
+
                 uiState.isLoading -> {
                     CircularProgressIndicator(
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
+
                 uiState.error != null -> {
                     Text(
                         text = uiState.error ?: "Unknown error",
@@ -338,6 +404,7 @@ fun GalleryScreen(
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
+
                 uiState.photos.isEmpty() -> {
                     Text(
                         text = "No photos found",
@@ -347,6 +414,7 @@ fun GalleryScreen(
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
+
                 else -> {
                     GalleryRefreshContainer(
                         isRefreshing = uiState.isRefreshing,
@@ -357,6 +425,7 @@ fun GalleryScreen(
                             val group = uiState.groups.firstOrNull {
                                 it.label == uiState.openedGroup
                             }
+
                             if (group != null) {
                                 PhotoGrid(
                                     photos = group.photos,
@@ -413,11 +482,13 @@ fun GalleryScreen(
                     .padding(16.dp * s),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = {
-                    val selectedUris = viewModel.getSelectedPhotos().map { it.uri }
-                    onPhotosSelected(selectedUris)
-                    viewModel.clearSelection()
-                }) {
+                TextButton(
+                    onClick = {
+                        val selectedUris = viewModel.getSelectedPhotos().map { it.uri }
+                        onPhotosSelected(selectedUris)
+                        viewModel.clearSelection()
+                    }
+                ) {
                     Text(
                         "Open (${uiState.selectedPhotos.size})",
                         style = MaterialTheme.typography.labelLarge.copy(
@@ -428,7 +499,139 @@ fun GalleryScreen(
             }
         }
     }
+
+    // Admin login dialog
+    if (showAdminLogin) {
+        AlertDialog(
+            onDismissRequest = {
+                showAdminLogin = false
+            },
+            title = {
+                Text("ورود مدیر")
+            },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = adminPassword,
+                        onValueChange = {
+                            adminPassword = it
+                            passwordError = false
+                        },
+                        label = {
+                            Text("رمز عبور")
+                        },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation()
+                    )
+
+                    if (passwordError) {
+                        Text(
+                            text = "رمز واردشده صحیح نیست",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val enteredHash = sha256(adminPassword)
+
+                        if (enteredHash == ADMIN_PASSWORD_HASH) {
+                            showAdminLogin = false
+                            showAdminPanel = true
+                            adminPassword = ""
+                            passwordError = false
+                        } else {
+                            passwordError = true
+                        }
+                    }
+                ) {
+                    Text("ورود")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        showAdminLogin = false
+                        adminPassword = ""
+                    }
+                ) {
+                    Text("انصراف")
+                }
+            }
+        )
+    }
+
+    // Admin dashboard
+    if (showAdminPanel) {
+        AlertDialog(
+            onDismissRequest = {
+                showAdminPanel = false
+            },
+            title = {
+                Text("پنل مدیریت")
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "وضعیت نصب: نصب‌شده",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+
+                    Text(
+                        text = "تعداد اجراها: $launchCount",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+
+                    Text(
+                        text = "آخرین اجرا: $lastLaunchText",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+
+                    Text(
+                        text = "تعداد نصب در این دستگاه: ۱",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+
+                    Text(
+                        text = "این آمار فقط مربوط به همین دستگاه است.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAdminPanel = false
+                    }
+                ) {
+                    Text("بستن")
+                }
+            }
+        )
+    }
 }
+
+private fun sha256(value: String): String {
+    val bytes = MessageDigest
+        .getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+
+    return bytes.joinToString("") {
+        "%02x".format(it)
+    }
+}
+
+/*
+ * This is a local-only password check.
+ * A hash embedded in an APK is not secure server authentication.
+ */
+private const val ADMIN_PASSWORD_HASH =
+    "c320c04c61892de6ce4cf3a9a832ff623326f3f9d2ee7bb336bee390801d201a"
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -441,6 +644,7 @@ private fun PhotoGrid(
 ) {
     val s = LocalUiScale.current
     val gap = 4.dp * s
+
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
         contentPadding = PaddingValues(gap),
@@ -500,6 +704,7 @@ private fun GroupGrid(
     onGroupClick: (PhotoGroup) -> Unit
 ) {
     val s = LocalUiScale.current
+
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
         contentPadding = PaddingValues(4.dp * s),
@@ -508,7 +713,10 @@ private fun GroupGrid(
         modifier = Modifier.fillMaxSize()
     ) {
         items(groups, key = { it.label }) { group ->
-            GroupTile(group = group, onClick = { onGroupClick(group) })
+            GroupTile(
+                group = group,
+                onClick = { onGroupClick(group) }
+            )
         }
     }
 }
@@ -520,6 +728,7 @@ private fun GroupTile(
     onClick: () -> Unit
 ) {
     val s = LocalUiScale.current
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -533,6 +742,7 @@ private fun GroupTile(
                 .fillMaxWidth()
                 .aspectRatio(1f)
         )
+
         Text(
             text = group.label,
             style = MaterialTheme.typography.labelMedium.copy(
@@ -542,7 +752,10 @@ private fun GroupTile(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp * s, vertical = 2.dp * s)
+                .padding(
+                    horizontal = 4.dp * s,
+                    vertical = 2.dp * s
+                )
         )
     }
 }
@@ -553,16 +766,14 @@ private fun TextButton(
     onClick: () -> Unit,
     content: @Composable () -> Unit
 ) {
-    androidx.compose.material3.TextButton(colors = colors, onClick = onClick) {
+    androidx.compose.material3.TextButton(
+        colors = colors,
+        onClick = onClick
+    ) {
         content()
     }
 }
 
-/**
- * Sort / Group panel: two sections — sort by (field + direction) and group by
- * (dimension + direction). The group direction row is visible but inert while
- * the dimension is None. Every selection applies and persists immediately.
- */
 @Composable
 private fun ViewingOptionsDialog(
     sortField: SortField,
@@ -576,6 +787,7 @@ private fun ViewingOptionsDialog(
     onDismiss: () -> Unit
 ) {
     val s = LocalUiScale.current
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -587,13 +799,16 @@ private fun ViewingOptionsDialog(
             )
         },
         text = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
                 Text(
                     text = "Sort by",
                     style = MaterialTheme.typography.titleSmall.copy(
                         fontSize = MaterialTheme.typography.titleSmall.fontSize * s
                     )
                 )
+
                 SortField.entries.forEach { field ->
                     SelectableChipRow(
                         label = field.label,
@@ -601,10 +816,15 @@ private fun ViewingOptionsDialog(
                         onClick = { onSortField(field) }
                     )
                 }
+
                 DirectionRow(
                     ascending = sortDirection == SortDirection.ASC,
-                    onAscending = { onSortDirection(SortDirection.ASC) },
-                    onDescending = { onSortDirection(SortDirection.DESC) }
+                    onAscending = {
+                        onSortDirection(SortDirection.ASC)
+                    },
+                    onDescending = {
+                        onSortDirection(SortDirection.DESC)
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(16.dp * s))
@@ -615,17 +835,25 @@ private fun ViewingOptionsDialog(
                         fontSize = MaterialTheme.typography.titleSmall.fontSize * s
                     )
                 )
+
                 GroupDimension.entries.forEach { dimension ->
                     SelectableChipRow(
                         label = dimension.label,
                         selected = dimension == groupDimension,
-                        onClick = { onGroupDimension(dimension) }
+                        onClick = {
+                            onGroupDimension(dimension)
+                        }
                     )
                 }
+
                 DirectionRow(
                     ascending = groupDirection == GroupDirection.ASC,
-                    onAscending = { onGroupDirection(GroupDirection.ASC) },
-                    onDescending = { onGroupDirection(GroupDirection.DESC) },
+                    onAscending = {
+                        onGroupDirection(GroupDirection.ASC)
+                    },
+                    onDescending = {
+                        onGroupDirection(GroupDirection.DESC)
+                    },
                     enabled = groupDimension != GroupDimension.NONE
                 )
             }
@@ -650,6 +878,7 @@ private fun SelectableChipRow(
     onClick: () -> Unit
 ) {
     val s = LocalUiScale.current
+
     FilterChip(
         selected = selected,
         onClick = onClick,
@@ -680,7 +909,10 @@ private fun DirectionRow(
     enabled: Boolean = true
 ) {
     val s = LocalUiScale.current
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp * s)) {
+
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp * s)
+    ) {
         FilterChip(
             selected = ascending,
             onClick = onAscending,
@@ -693,8 +925,11 @@ private fun DirectionRow(
                     )
                 )
             },
-            modifier = Modifier.heightIn((32.dp * s).coerceAtLeast(28.dp))
+            modifier = Modifier.heightIn(
+                (32.dp * s).coerceAtLeast(28.dp)
+            )
         )
+
         FilterChip(
             selected = !ascending,
             onClick = onDescending,
@@ -707,7 +942,9 @@ private fun DirectionRow(
                     )
                 )
             },
-            modifier = Modifier.heightIn((32.dp * s).coerceAtLeast(28.dp))
+            modifier = Modifier.heightIn(
+                (32.dp * s).coerceAtLeast(28.dp)
+            )
         )
     }
 }
@@ -733,7 +970,6 @@ private val GroupDimension.label: String
         GroupDimension.TAKEN_MONTHLY -> "Date taken (monthly)"
     }
 
-/** A horizontal row of toggleable scene-tag filter chips. */
 @Composable
 private fun TagFilterRow(
     availableTags: List<SceneTag>,
@@ -741,11 +977,15 @@ private fun TagFilterRow(
     onTagSelected: (SceneTag?) -> Unit
 ) {
     val s = LocalUiScale.current
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp * s, vertical = 4.dp * s),
+            .padding(
+                horizontal = 12.dp * s,
+                vertical = 4.dp * s
+            ),
         horizontalArrangement = Arrangement.spacedBy(8.dp * s)
     ) {
         if (selectedTag != null) {
@@ -760,17 +1000,24 @@ private fun TagFilterRow(
                         )
                     )
                 },
-                modifier = Modifier.heightIn((32.dp * s).coerceAtLeast(28.dp)),
+                modifier = Modifier.heightIn(
+                    (32.dp * s).coerceAtLeast(28.dp)
+                ),
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.primary,
                     selectedLabelColor = MaterialTheme.colorScheme.onPrimary
                 )
             )
         }
+
         availableTags.forEach { tag ->
             FilterChip(
                 selected = selectedTag == tag,
-                onClick = { onTagSelected(if (selectedTag == tag) null else tag) },
+                onClick = {
+                    onTagSelected(
+                        if (selectedTag == tag) null else tag
+                    )
+                },
                 label = {
                     Text(
                         text = tag.displayName,
@@ -779,7 +1026,9 @@ private fun TagFilterRow(
                         )
                     )
                 },
-                modifier = Modifier.heightIn((32.dp * s).coerceAtLeast(28.dp)),
+                modifier = Modifier.heightIn(
+                    (32.dp * s).coerceAtLeast(28.dp)
+                ),
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.primary,
                     selectedLabelColor = MaterialTheme.colorScheme.onPrimary
@@ -789,52 +1038,9 @@ private fun TagFilterRow(
     }
 }
 
-// Exposes the indicator's live opacity to tests (read back from the semantics
-// node, not from pixels). Only published when indicatorTestTag is set.
-internal val IndicatorAlphaKey = SemanticsPropertyKey<Float>("indicatorAlpha")
+internal val IndicatorAlphaKey =
+    SemanticsPropertyKey<Float>("indicatorAlpha")
 
-/**
- * Pull-to-refresh container for the [PhotoGrid]. Replaces material3's opaque
- * [androidx.compose.material3.pulltorefresh.PullToRefreshBox] so the app owns
- * the indicator's lifetime. material3 1.3.1's boxed indicator can fail its
- * detach/fade-out and linger after `isRefreshing` drops back to false — notably
- * when the true→false flip lands in a single frame, which Compose coalesces into
- * only observing `false`. We therefore run the indicator through an app-owned
- * `Animatable` and remove it from the composition only after our own exit fade
- * has finished, betting on nothing inside material3.
- *
- * Visual lifecycle (standard pull-to-refresh feedback):
- *  - while the finger drags the grid down the indicator is composed (it never
- *    awaited `isRefreshing`, which only flips once `refreshPhotos()` runs) and
- *    follows the pull via `PullToRefreshState.distanceFraction` (the
- *    [PullToRefreshDefaults.Indicator] draws the pull progress ring itself);
- *  - past the threshold material3 fires [onRefresh], `isRefreshing` goes true
- *    and the indicator becomes the spinning progress icon for the re-read;
- *  - on completion the indicator is NOT hard-removed: it fades/scales out and
- *    only then leaves the composition.
- *
- * Owner model (single owner for the exit — the `81e026d` regression ran a
- * second, app-owned `animateToHidden()` that raced material3's internal reset
- * through the state's `MutatorMutex`):
- *  - the pull STATE is reset by material3 only: `Modifier.pullToRefresh` carries
- *    its own `LaunchedEffect(isRefreshing)` that calls `animateToHidden()` when
- *    the flag drops false, so the app never calls it (a second concurrent reset
- *    on the same backing `Animatable` would cancel the first).
- *  - the exit fade is driven PURELY off `isRefreshing`, never off
- *    `distanceFraction`: the moment a completed refresh is observed (even as the
- *    only observation of a coalesced true→false frame) our fade takes over and
- *    reaches 0, so the indicator cannot linger.
- *  - when the fade ends the app pins the state to rest with `snapTo(0f)` so
- *    nothing is left to resurrect the icon: material3 1.3.1's state is a single
- *    `Animatable` whose own `animateToHidden()` settles to exactly 0 and our
- *    snap cancels it to rest, so after an exit `distanceFraction` is
- *    deterministically 0 and the next pull's feedback reappears normally.
- *
- * Feedback is transiently guarded while `exitFadeRunning` is up (a settling
- * `distanceFraction` tick must not fight the fade), and the icon only ever
- * re-appears when the user starts a real pull again. Gesture wiring is
- * identical to `PullToRefreshBox`.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun GalleryRefreshContainer(
@@ -847,37 +1053,41 @@ internal fun GalleryRefreshContainer(
 ) {
     val distanceFraction = pullState.distanceFraction
 
-    val indicatorAlpha = remember { Animatable(0f) }
-    var exitFadeRunning by remember { mutableStateOf(false) }
+    val indicatorAlpha = remember {
+        Animatable(0f)
+    }
 
-    // Completion exit — the only owner of the fade. Runs whenever isRefreshing
-    // reads false while the icon is up, so a coalesced true→false frame still
-    // triggers it exactly once (the d186ec6 guard). The pull STATE's own reset
-    // is left to material3's modifier; here we only fade our Animatable and then
-    // pin the state to rest, so no residual distanceFraction is left behind.
+    var exitFadeRunning by remember {
+        mutableStateOf(false)
+    }
+
     LaunchedEffect(isRefreshing) {
         if (isRefreshing) {
             exitFadeRunning = false
             indicatorAlpha.snapTo(1f)
         } else if (indicatorAlpha.value > 0f) {
             exitFadeRunning = true
-            indicatorAlpha.animateTo(0f, tween(durationMillis = 220))
+            indicatorAlpha.animateTo(
+                0f,
+                tween(durationMillis = 220)
+            )
             pullState.snapTo(0f)
             exitFadeRunning = false
         }
     }
 
-    // Live in-gesture feedback (before the threshold / without a refresh): the
-    // indicator appears as the pull starts and follows distanceFraction. Keyed on
-    // exitFadeRunning so the fade→clear transition can't re-run this effect with
-    // a still-settling distanceFraction. No persistent post-exit latch: material3
-    // 1.3.1's PullToRefreshState is a single Animatable whose animateToHidden
-    // settles to exactly 0, and the exit above force-snaps it to 0, so after a
-    // completed exit distanceFraction is deterministically at rest — the next
-    // real pull can and must show feedback again.
-    LaunchedEffect(distanceFraction, isRefreshing, exitFadeRunning) {
-        if (isRefreshing || exitFadeRunning) return@LaunchedEffect
-        indicatorAlpha.snapTo(if (distanceFraction > 0f) 1f else 0f)
+    LaunchedEffect(
+        distanceFraction,
+        isRefreshing,
+        exitFadeRunning
+    ) {
+        if (isRefreshing || exitFadeRunning) {
+            return@LaunchedEffect
+        }
+
+        indicatorAlpha.snapTo(
+            if (distanceFraction > 0f) 1f else 0f
+        )
     }
 
     Box(
@@ -888,6 +1098,7 @@ internal fun GalleryRefreshContainer(
         )
     ) {
         content()
+
         if (indicatorAlpha.value > 0f || isRefreshing) {
             PullToRefreshDefaults.Indicator(
                 state = pullState,
@@ -903,7 +1114,10 @@ internal fun GalleryRefreshContainer(
                     .then(
                         if (indicatorTestTag != null) {
                             Modifier
-                                .semantics { this[IndicatorAlphaKey] = indicatorAlpha.value }
+                                .semantics {
+                                    this[IndicatorAlphaKey] =
+                                        indicatorAlpha.value
+                                }
                                 .testTag(indicatorTestTag)
                         } else {
                             Modifier
