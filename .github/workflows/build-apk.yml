@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - master
+      - main
 
 permissions:
   contents: read
@@ -16,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Source
+      - name: Checkout Source
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -28,10 +29,13 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Accept Android SDK Licenses
+        run: yes | sdkmanager --licenses
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build APK
+      - name: Build Debug APK
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleDebug
@@ -40,6 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: whimsicalart-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            **/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
